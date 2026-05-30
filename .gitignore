@@ -26,6 +26,8 @@ __pycache__/
 build/
 build_*/
 work/build*/
+GrokMultiProviderBatchTool.exe
+work/GrokMultiProviderBatchTool*.spec
 dist/
 *.log
 

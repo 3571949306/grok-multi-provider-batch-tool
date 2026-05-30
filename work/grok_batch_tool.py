@@ -17,7 +17,8 @@ from tkinter.scrolledtext import ScrolledText
 API_BASE = "https://api.x.ai/v1"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "GrokMultiProviderBatchTool"
 CONFIG_PATH = APP_DIR / "config.json"
-PROJECT_URL = "https://github.com/3571949306/grok-multi-provider-batch-tool"
+APP_NAME = "MultiProviderAIBatchTool"
+PROJECT_URL = "https://github.com/3571949306/multi-provider-ai-batch-tool"
 MODE_LABELS = {
     "xAI 异步 Batch（逐条提交）": "xai_batch",
     "xAI 异步 Batch（JSONL 文件上传）": "xai_batch_file",
@@ -76,46 +77,141 @@ class SavedConfig:
     show_guide_on_start: bool = True
 
 
-GUIDE_TEXT = f"""多供应商 AI 批量处理工具使用说明
+SIMPLE_GUIDE_TEXT = f"""多供应商 AI 批量处理工具使用说明（简单版）
 
 项目地址：
 {PROJECT_URL}
 
-一、先选供应商
-1. xAI Grok Batch 官方：适合使用 Grok 官方 Batch。
-2. OpenAI：适合使用 OpenAI 官方 Batch。
-3. 阿里百炼、SiliconFlow、Kimi、DeepSeek、国内第三方中转：通常走 OpenAI 兼容并发调用。
-4. 如果第三方明确支持 /v1/batches，可以手动改 Base URL 和处理方式再测试。
-
-二、配置 API Key 和模型
+最快使用流程：
+1. 选择供应商。
 1. 填写 API Key。
-2. 点击“测试 Key”确认 Key 和 Base URL 匹配。
-3. 点击“获取模型列表”自动读取 /models；如果供应商不支持 /models，可以手动填写模型名。
-4. 勾选“保存 Key 到本机配置”后，每个供应商会独立保存自己的 Key、Base URL、模型和并发数。
+3. 点击“测试 Key”，确认 Key、Base URL 和供应商匹配。
+4. 点击“获取模型列表”，选择模型；如果获取失败，就手动填写模型名。
+5. 在 System Prompt 写统一要求。
+6. 在任务框里每行写一条任务，或加载 txt/csv。
+7. 点击“开始处理”。
+8. 处理完成后，在“结果查看器”看正文。
 
-三、处理方式怎么选
-1. xAI 异步 Batch（JSONL 文件上传）：推荐给 Grok 批量任务，真正走 Batch。
-2. xAI 异步 Batch（逐条提交）：兼容旧流程，也是真正走 Batch。
-3. OpenAI 官方 Batch（JSONL 文件上传）：推荐给 OpenAI 批量任务，真正走 Batch。
-4. 兼容批量调用（OpenAI 格式）：不是 Batch，是逐条请求 /chat/completions，只是工具帮你并发处理。
+模式怎么选：
+1. Grok 大批量任务：优先选“xAI 异步 Batch（JSONL 文件上传）”。
+2. OpenAI 大批量任务：优先选“OpenAI 官方 Batch（JSONL 文件上传）”。
+3. DeepSeek、Kimi、百炼、SiliconFlow、中转商：通常选“兼容批量调用（OpenAI 格式）”。
 
-四、怎么判断有没有真的走 Batch
+怎么确认是否真的走 Batch：
 1. 点击“判断执行方式”。
-2. 如果日志显示“已走 Batch”并有 Batch ID，说明走了 /batches。
-3. 如果显示“非 Batch：OpenAI 兼容并发调用”，说明只是逐条调用 /chat/completions。
+2. 显示“已走 Batch”并有 Batch ID，说明是 Batch。
+3. 显示“非 Batch：OpenAI 兼容并发调用”，说明不是 Batch，而是逐条调用 /chat/completions。
 
-五、怎么最划算
-1. 大量、不急着立刻拿结果的任务：优先用官方 Batch。通常比实时接口更适合批量处理。
-2. 少量、需要马上看结果的任务：用兼容批量调用或普通实时接口更方便。
-3. 第一次测试不要提交太多：先用 1 到 3 条验证 Key、模型、结果格式，再扩大到几十条或更多。
-4. 任务很多时，把相似任务放在同一个 System Prompt 下，每行一个输入，避免重复写长提示词。
-5. 如果文件上传 Batch 接近 50 MB 或 200 MB，请拆分，减少失败后重跑的成本。
+怎么更划算：
+1. 大量、不急着立刻拿结果：用官方 Batch。
+2. 少量、要马上看结果：用兼容批量调用。
+3. 第一次先用 1 到 3 条测试，确认没问题再批量跑。
+4. 相同任务共用一个 System Prompt，每行只放不同输入，减少重复 token。
 
-六、结果在哪里看
+结果怎么看：
 1. 处理完成会自动导出 JSON 和 CSV，并加载到“结果查看器”。
 2. 也可以点击“打开最近结果”或“打开结果文件”。
 3. 左侧选任务编号，右侧查看输出正文和原始 JSON。
 4. 点击“复制选中结果”可复制当前结果正文。
+"""
+
+
+DETAILED_GUIDE_TEXT = f"""多供应商 AI 批量处理工具使用说明（超详细版）
+
+项目地址：
+{PROJECT_URL}
+
+一、这个工具解决什么问题
+这个工具用于把很多条文本任务批量提交给不同 AI 供应商。它支持两类工作方式：
+1. 官方 Batch：把任务打包成批处理，让服务商后台异步处理。
+2. 兼容批量调用：不走 Batch，而是工具在本机并发逐条调用 /chat/completions。
+
+二、供应商怎么选
+1. xAI Grok Batch 官方：
+   适合 Grok 官方 Batch。推荐优先使用“xAI 异步 Batch（JSONL 文件上传）”。
+
+2. OpenAI：
+   适合 OpenAI 官方 Batch。推荐使用“OpenAI 官方 Batch（JSONL 文件上传）”。
+
+3. 阿里百炼、SiliconFlow、Kimi、DeepSeek：
+   这些通常提供 OpenAI 兼容的 /chat/completions。默认建议使用“兼容批量调用（OpenAI 格式）”。
+
+4. 国内第三方中转 / 聚合商：
+   如果对方只提供 /chat/completions，选“兼容批量调用（OpenAI 格式）”。
+   如果对方明确写了支持 /v1/batches 和 /v1/files，可以手动切换到 Batch 模式再测试。
+
+三、API Key 怎么保存
+1. 每个供应商会独立保存自己的 API Key、Base URL、模型和并发数。
+2. 切换供应商时，工具会自动切换到该供应商保存过的 Key。
+3. 可以在“设置”里控制是否默认保存 Key。
+4. 保存位置是本机用户配置目录，不会上传到 GitHub。
+5. 如果 Key 填错，可以点“清除保存”清理本机配置。
+
+四、模型怎么获取
+1. 点击“获取模型列表”会访问当前 Base URL 的 /models。
+2. 不是每个供应商都支持 /models。
+3. 如果 /models 失败，但你知道模型名，可以直接手动填写模型。
+4. 如果提示 API Key 无效，通常是供应商选错、Base URL 不匹配、Key 复制错误或 Key 没有权限。
+
+五、四种处理方式解释
+1. xAI 异步 Batch（JSONL 文件上传）
+   真正走 xAI Batch。工具会生成 JSONL 文件，上传到 /files，再创建 /batches。
+   适合大量 Grok 文本处理任务。
+
+2. xAI 异步 Batch（逐条提交）
+   真正走 xAI Batch。工具先创建 batch，再把请求逐批提交到 /batches/{id}/requests。
+   这是旧式兼容流程。
+
+3. OpenAI 官方 Batch（JSONL 文件上传）
+   真正走 OpenAI Batch。工具生成 JSONL，上传到 OpenAI Files，再创建 Batch。
+   适合大量 OpenAI 文本任务。
+
+4. 兼容批量调用（OpenAI 格式）
+   不是 Batch。工具会在本机并发逐条调用 /chat/completions。
+   适合 DeepSeek、Kimi、百炼、SiliconFlow、第三方中转等不明确支持 Batch 的服务。
+
+六、怎么判断是不是真的走 Batch
+1. 点击“判断执行方式”。
+2. 如果能通过 /batches 查询到状态，并显示 Batch ID，说明走了 Batch。
+3. 如果日志写“非 Batch：OpenAI 兼容并发调用”，说明没有走 Batch。
+4. 导出的 JSON/CSV 也会包含 execution_mode 和 is_batch 字段。
+
+七、任务怎么填
+1. System Prompt：写统一规则，例如“你是资深中文文案编辑，请逐条润色”。
+2. 任务输入框：每行一条任务。
+3. txt 文件：每行一条。
+4. csv/tsv 文件：优先读取 text、content、prompt、input 列；没有表头则读取第一列。
+5. 可以“加载并替换”，也可以“追加加载”。
+
+八、怎么最划算
+1. 大量任务且不急：优先官方 Batch。
+2. 少量任务或需要马上看结果：用兼容批量调用。
+3. 先小规模测试：1 到 3 条。
+4. 成功后再逐步扩大：10 条、50 条、更多。
+5. System Prompt 不要每条重复写在任务里，统一放在 System Prompt 区域。
+6. 超大任务拆分运行，避免上传失败后整批重跑。
+7. 如果供应商有限流，降低并发数。
+
+九、结果怎么看
+1. 处理完成后会自动导出 JSON 和 CSV。
+2. 结果会自动加载到“结果查看器”。
+3. 左侧选择任务编号。
+4. 右侧上半部分是提取出的输出正文。
+5. 右侧下半部分是原始 JSON，方便排查格式问题。
+6. 如果打开旧 CSV 且 text 列为空，工具会尝试解析 raw_json 并提取正文。
+
+十、常见问题
+1. 为什么 Batch 很快完成？
+   如果只有 1 条短任务，Batch 也可能几秒完成。看是否有 Batch ID 和 /batches 状态，不要只看速度。
+
+2. 为什么获取模型失败？
+   可能是 Key 错、Base URL 错、供应商不支持 /models，或 Key 没有权限。
+
+3. 为什么 DeepSeek 等不默认走 Batch？
+   因为没有确认官方 Batch 文档时，默认走兼容并发更稳。若第三方中转明确支持 Batch，可手动配置。
+
+4. 结果文件在哪里？
+   默认在 exe 同目录的 batch_results 文件夹。可以在“设置”里改输出目录。
 """
 
 
@@ -272,7 +368,7 @@ def default_output_dir():
 class GrokBatchTool:
     def __init__(self, root):
         self.root = root
-        self.root.title("多供应商 AI 批量处理工具")
+        self.root.title("MultiProviderAIBatchTool - 多供应商 AI 批量处理工具")
         self.root.geometry("1180x820")
         self.last_results = []
         self.viewer_results = []
@@ -314,7 +410,7 @@ class GrokBatchTool:
         self.main_scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=self.canvas.yview)
         self.main_frame = Frame(self.canvas)
         self.main_window = self.canvas.create_window((0, 0), window=self.main_frame, anchor="nw")
-        self.canvas.configure(yscrollcommand=self.main_scrollbar.set)
+        self.canvas.configure(yscrollcommand=self.main_scrollbar.set, yscrollincrement=24)
         self.canvas.pack(side=LEFT, fill=BOTH, expand=True)
         self.main_scrollbar.pack(side=RIGHT, fill="y")
 
@@ -325,7 +421,8 @@ class GrokBatchTool:
             self.canvas.itemconfigure(self.main_window, width=event.width)
 
         def mousewheel(event):
-            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            delta = -1 if event.delta > 0 else 1
+            self.canvas.yview_scroll(delta, "units")
 
         self.main_frame.bind("<Configure>", sync_scroll_region)
         self.canvas.bind("<Configure>", sync_window_width)
@@ -565,15 +662,28 @@ class GrokBatchTool:
     def open_guide(self):
         win = Toplevel(self.root)
         win.title("使用说明与省钱建议")
-        win.geometry("820x680")
+        win.geometry("900x720")
         win.transient(self.root)
 
         body = Frame(win, padx=10, pady=10)
         body.pack(fill=BOTH, expand=True)
-        text = ScrolledText(body, wrap="word")
-        text.pack(fill=BOTH, expand=True)
-        text.insert(END, GUIDE_TEXT)
-        text.configure(state="disabled")
+        notebook = ttk.Notebook(body)
+        notebook.pack(fill=BOTH, expand=True)
+
+        simple_tab = Frame(notebook)
+        detailed_tab = Frame(notebook)
+        notebook.add(simple_tab, text="简单版")
+        notebook.add(detailed_tab, text="超详细版")
+
+        simple_text = ScrolledText(simple_tab, wrap="word")
+        simple_text.pack(fill=BOTH, expand=True)
+        simple_text.insert(END, SIMPLE_GUIDE_TEXT)
+        simple_text.configure(state="disabled")
+
+        detailed_text = ScrolledText(detailed_tab, wrap="word")
+        detailed_text.pack(fill=BOTH, expand=True)
+        detailed_text.insert(END, DETAILED_GUIDE_TEXT)
+        detailed_text.configure(state="disabled")
 
         footer = Frame(win, padx=10, pady=8)
         footer.pack(fill=X)
@@ -942,8 +1052,8 @@ class GrokBatchTool:
         out_dir = self.get_output_dir()
         stamp = time.strftime("%Y%m%d_%H%M%S")
         safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)[:80]
-        json_path = out_dir / f"grok_batch_results_{safe_name}_{stamp}.json"
-        csv_path = out_dir / f"grok_batch_results_{safe_name}_{stamp}.csv"
+        json_path = out_dir / f"ai_batch_results_{safe_name}_{stamp}.json"
+        csv_path = out_dir / f"ai_batch_results_{safe_name}_{stamp}.csv"
         meta = {
             "execution_mode": self.last_run_mode or self.describe_current_execution_mode(),
             "is_batch": bool(self.last_batch_verified),
@@ -1106,6 +1216,8 @@ class GrokBatchTool:
         candidates = []
         for folder in {self.get_output_dir(), default_output_dir(), Path.cwd() / "outputs", Path.cwd() / "outputs" / "outputs"}:
             if folder.exists():
+                candidates.extend(folder.glob("ai_batch_results_*.json"))
+                candidates.extend(folder.glob("ai_batch_results_*.csv"))
                 candidates.extend(folder.glob("grok_batch_results_*.json"))
                 candidates.extend(folder.glob("grok_batch_results_*.csv"))
         if not candidates:
