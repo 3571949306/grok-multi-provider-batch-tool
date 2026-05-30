@@ -24,6 +24,8 @@ outputs/
 __pycache__/
 *.py[cod]
 build/
+build_*/
+work/build*/
 dist/
 *.log
 

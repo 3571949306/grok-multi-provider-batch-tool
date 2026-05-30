@@ -10,13 +10,14 @@ import urllib.request
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, X, Button, Checkbutton, Entry, Frame, Label, LabelFrame, StringVar, BooleanVar, Tk, Toplevel, filedialog, messagebox, ttk
+from tkinter import BOTH, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entry, Frame, Label, LabelFrame, StringVar, BooleanVar, Tk, Toplevel, filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 
 API_BASE = "https://api.x.ai/v1"
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "GrokMultiProviderBatchTool"
 CONFIG_PATH = APP_DIR / "config.json"
+PROJECT_URL = "https://github.com/3571949306/grok-multi-provider-batch-tool"
 MODE_LABELS = {
     "xAI 异步 Batch（逐条提交）": "xai_batch",
     "xAI 异步 Batch（JSONL 文件上传）": "xai_batch_file",
@@ -72,6 +73,50 @@ class SavedConfig:
     output_folder: str = ""
     auto_save_on_switch: bool = True
     auto_save_keys: bool = True
+    show_guide_on_start: bool = True
+
+
+GUIDE_TEXT = f"""多供应商 AI 批量处理工具使用说明
+
+项目地址：
+{PROJECT_URL}
+
+一、先选供应商
+1. xAI Grok Batch 官方：适合使用 Grok 官方 Batch。
+2. OpenAI：适合使用 OpenAI 官方 Batch。
+3. 阿里百炼、SiliconFlow、Kimi、DeepSeek、国内第三方中转：通常走 OpenAI 兼容并发调用。
+4. 如果第三方明确支持 /v1/batches，可以手动改 Base URL 和处理方式再测试。
+
+二、配置 API Key 和模型
+1. 填写 API Key。
+2. 点击“测试 Key”确认 Key 和 Base URL 匹配。
+3. 点击“获取模型列表”自动读取 /models；如果供应商不支持 /models，可以手动填写模型名。
+4. 勾选“保存 Key 到本机配置”后，每个供应商会独立保存自己的 Key、Base URL、模型和并发数。
+
+三、处理方式怎么选
+1. xAI 异步 Batch（JSONL 文件上传）：推荐给 Grok 批量任务，真正走 Batch。
+2. xAI 异步 Batch（逐条提交）：兼容旧流程，也是真正走 Batch。
+3. OpenAI 官方 Batch（JSONL 文件上传）：推荐给 OpenAI 批量任务，真正走 Batch。
+4. 兼容批量调用（OpenAI 格式）：不是 Batch，是逐条请求 /chat/completions，只是工具帮你并发处理。
+
+四、怎么判断有没有真的走 Batch
+1. 点击“判断执行方式”。
+2. 如果日志显示“已走 Batch”并有 Batch ID，说明走了 /batches。
+3. 如果显示“非 Batch：OpenAI 兼容并发调用”，说明只是逐条调用 /chat/completions。
+
+五、怎么最划算
+1. 大量、不急着立刻拿结果的任务：优先用官方 Batch。通常比实时接口更适合批量处理。
+2. 少量、需要马上看结果的任务：用兼容批量调用或普通实时接口更方便。
+3. 第一次测试不要提交太多：先用 1 到 3 条验证 Key、模型、结果格式，再扩大到几十条或更多。
+4. 任务很多时，把相似任务放在同一个 System Prompt 下，每行一个输入，避免重复写长提示词。
+5. 如果文件上传 Batch 接近 50 MB 或 200 MB，请拆分，减少失败后重跑的成本。
+
+六、结果在哪里看
+1. 处理完成会自动导出 JSON 和 CSV，并加载到“结果查看器”。
+2. 也可以点击“打开最近结果”或“打开结果文件”。
+3. 左侧选任务编号，右侧查看输出正文和原始 JSON。
+4. 点击“复制选中结果”可复制当前结果正文。
+"""
 
 
 def request_json(method, path, api_key, payload=None):
@@ -173,6 +218,13 @@ def extract_text(value):
             return value["content"]
         if "output_text" in value and isinstance(value["output_text"], str):
             return value["output_text"]
+        if isinstance(value.get("raw_json"), str) and value["raw_json"].strip():
+            try:
+                found = extract_text(json.loads(value["raw_json"]))
+                if found:
+                    return found
+            except json.JSONDecodeError:
+                pass
         if isinstance(value.get("message"), dict):
             found = extract_text(value["message"])
             if found:
@@ -224,6 +276,8 @@ class GrokBatchTool:
         self.root.geometry("1180x820")
         self.last_results = []
         self.viewer_results = []
+        self.last_run_mode = ""
+        self.last_batch_verified = False
         self.saved = self.load_config_file()
         self.provider_configs = self.saved.providers if isinstance(self.saved.providers, dict) else {}
         if self.saved.provider and self.saved.provider not in self.provider_configs:
@@ -249,11 +303,35 @@ class GrokBatchTool:
         self.output_folder = StringVar(value=self.saved.output_folder)
         self.auto_save_on_switch = BooleanVar(value=bool(self.saved.auto_save_on_switch))
         self.auto_save_keys = BooleanVar(value=bool(self.saved.auto_save_keys))
+        self.show_guide_on_start = BooleanVar(value=bool(self.saved.show_guide_on_start))
 
         self.build_ui()
+        if self.show_guide_on_start.get():
+            self.root.after(300, self.open_guide)
 
     def build_ui(self):
-        config_frame = LabelFrame(self.root, text="1. 接口配置", padx=10, pady=8)
+        self.canvas = Canvas(self.root, highlightthickness=0)
+        self.main_scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=self.canvas.yview)
+        self.main_frame = Frame(self.canvas)
+        self.main_window = self.canvas.create_window((0, 0), window=self.main_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.main_scrollbar.set)
+        self.canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self.main_scrollbar.pack(side=RIGHT, fill="y")
+
+        def sync_scroll_region(_event=None):
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+        def sync_window_width(event):
+            self.canvas.itemconfigure(self.main_window, width=event.width)
+
+        def mousewheel(event):
+            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        self.main_frame.bind("<Configure>", sync_scroll_region)
+        self.canvas.bind("<Configure>", sync_window_width)
+        self.canvas.bind_all("<MouseWheel>", mousewheel)
+
+        config_frame = LabelFrame(self.main_frame, text="1. 接口配置", padx=10, pady=8)
         config_frame.pack(fill=X, padx=10, pady=(10, 6))
 
         top = Frame(config_frame)
@@ -289,7 +367,7 @@ class GrokBatchTool:
         Entry(run_opts, textvariable=self.concurrency, width=6).pack(side=LEFT, padx=6)
         Label(run_opts, text="说明：文件上传 Batch 上限通常是 200 MB/50,000 条；兼容批量调用适合不支持 Batch 的中转商。").pack(side=LEFT, padx=12)
 
-        task_frame = LabelFrame(self.root, text="2. 任务内容", padx=10, pady=8)
+        task_frame = LabelFrame(self.main_frame, text="2. 任务内容", padx=10, pady=8)
         task_frame.pack(fill=BOTH, expand=True, padx=10, pady=6)
         Label(task_frame, text="System Prompt").pack(anchor="w")
         self.system_prompt = ScrolledText(task_frame, height=4, wrap="word")
@@ -310,7 +388,7 @@ class GrokBatchTool:
         self.input_text = ScrolledText(input_frame, height=10, wrap="word")
         self.input_text.pack(fill=BOTH, expand=True)
 
-        run_frame = LabelFrame(self.root, text="3. 运行与结果", padx=10, pady=8)
+        run_frame = LabelFrame(self.main_frame, text="3. 运行与结果", padx=10, pady=8)
         run_frame.pack(fill=X, padx=10, pady=6)
         btns = Frame(run_frame)
         btns.pack(fill=X)
@@ -319,18 +397,19 @@ class GrokBatchTool:
         Entry(btns, textvariable=self.batch_id, width=42).pack(side=LEFT, padx=3)
         Button(btns, text="查询进度", command=self.check_status).pack(side=LEFT, padx=3)
         Button(btns, text="获取并导出结果", command=self.fetch_results).pack(side=LEFT, padx=3)
+        Button(btns, text="判断执行方式", command=self.check_execution_mode).pack(side=LEFT, padx=3)
 
         state_frame = Frame(run_frame)
         state_frame.pack(fill=X)
         Label(state_frame, textvariable=self.status).pack(side=LEFT)
 
-        result_frame = Frame(self.root, padx=10, pady=4)
+        result_frame = Frame(self.main_frame, padx=10, pady=4)
         result_frame.pack(fill=BOTH, expand=True)
         Label(result_frame, text="日志 / 返回内容").pack(anchor="w")
         self.output = ScrolledText(result_frame, height=7, wrap="word")
         self.output.pack(fill=BOTH, expand=True)
 
-        viewer_frame = LabelFrame(self.root, text="4. 结果查看器", padx=10, pady=8)
+        viewer_frame = LabelFrame(self.main_frame, text="4. 结果查看器", padx=10, pady=8)
         viewer_frame.pack(fill=BOTH, expand=True, padx=10, pady=6)
         viewer_tools = Frame(viewer_frame)
         viewer_tools.pack(fill=X, pady=(0, 6))
@@ -360,7 +439,7 @@ class GrokBatchTool:
         self.result_detail = ScrolledText(detail_frame, height=8, wrap="word")
         self.result_detail.pack(fill=BOTH, expand=True)
 
-        bottom = Frame(self.root, padx=10, pady=6)
+        bottom = Frame(self.main_frame, padx=10, pady=6)
         bottom.pack(fill=X)
         Button(bottom, text="保存日志", command=self.save_log).pack(side=RIGHT, padx=3)
 
@@ -414,9 +493,10 @@ class GrokBatchTool:
             "system_prompt": self.system_prompt.get("1.0", END).strip(),
             "providers": self.provider_configs,
             "output_folder": self.output_folder.get().strip(),
-            "auto_save_on_switch": self.auto_save_on_switch.get(),
-            "auto_save_keys": self.auto_save_keys.get(),
-        }
+                "auto_save_on_switch": self.auto_save_on_switch.get(),
+                "auto_save_keys": self.auto_save_keys.get(),
+                "show_guide_on_start": self.show_guide_on_start.get(),
+            }
         CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def clear_saved_config(self):
@@ -462,6 +542,11 @@ class GrokBatchTool:
         row3.pack(fill=X, pady=6)
         Checkbutton(row3, text="默认允许保存 API Key 到本机配置", variable=self.auto_save_keys).pack(side=LEFT)
 
+        row_guide = Frame(box)
+        row_guide.pack(fill=X, pady=6)
+        Checkbutton(row_guide, text="启动时显示使用说明", variable=self.show_guide_on_start).pack(side=LEFT)
+        Button(row_guide, text="打开使用说明", command=self.open_guide).pack(side=LEFT, padx=12)
+
         row4 = Frame(box)
         row4.pack(fill=X, pady=6)
         Label(row4, text=f"配置文件: {CONFIG_PATH}").pack(side=LEFT)
@@ -476,6 +561,37 @@ class GrokBatchTool:
 
         Button(buttons, text="保存设置", command=save_and_close).pack(side=RIGHT, padx=4)
         Button(buttons, text="取消", command=win.destroy).pack(side=RIGHT, padx=4)
+
+    def open_guide(self):
+        win = Toplevel(self.root)
+        win.title("使用说明与省钱建议")
+        win.geometry("820x680")
+        win.transient(self.root)
+
+        body = Frame(win, padx=10, pady=10)
+        body.pack(fill=BOTH, expand=True)
+        text = ScrolledText(body, wrap="word")
+        text.pack(fill=BOTH, expand=True)
+        text.insert(END, GUIDE_TEXT)
+        text.configure(state="disabled")
+
+        footer = Frame(win, padx=10, pady=8)
+        footer.pack(fill=X)
+
+        def copy_project_url():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(PROJECT_URL)
+            self.log("已复制项目地址。")
+
+        def close_and_save():
+            self.show_guide_on_start.set(False)
+            self.save_config(quiet=True)
+            win.destroy()
+
+        Button(footer, text="复制项目地址", command=copy_project_url).pack(side=LEFT, padx=4)
+        Checkbutton(footer, text="下次启动继续显示", variable=self.show_guide_on_start).pack(side=LEFT, padx=12)
+        Button(footer, text="关闭", command=win.destroy).pack(side=RIGHT, padx=4)
+        Button(footer, text="关闭并下次不再自动显示", command=close_and_save).pack(side=RIGHT, padx=4)
 
     def test_key(self):
         def work():
@@ -554,6 +670,26 @@ class GrokBatchTool:
         self.output.insert(END, f"{time.strftime('%H:%M:%S')}  {message}\n")
         self.output.see(END)
         self.status.set(message)
+
+    def describe_current_execution_mode(self):
+        mode = self.current_mode()
+        if mode == "xai_batch":
+            return "xAI 官方 Batch（逐条提交到 /batches/{id}/requests）"
+        if mode == "xai_batch_file":
+            return "xAI 官方 Batch（JSONL 文件上传到 /files 后创建 /batches）"
+        if mode == "openai_batch_file":
+            return "OpenAI 官方 Batch（JSONL 文件上传到 /files 后创建 /batches）"
+        return "非 Batch：OpenAI 兼容并发调用（逐条请求 /chat/completions）"
+
+    def mark_batch_verified(self, label, batch_id):
+        self.last_run_mode = label
+        self.last_batch_verified = True
+        self.log(f"执行方式确认：已走 Batch。方式：{label}；Batch ID：{batch_id}")
+
+    def mark_non_batch(self):
+        self.last_run_mode = "非 Batch：OpenAI 兼容并发调用（/chat/completions）"
+        self.last_batch_verified = False
+        self.log("执行方式确认：未走 Batch。方式：OpenAI 兼容并发调用；接口：/chat/completions。")
 
     def run_async(self, fn):
         threading.Thread(target=fn, daemon=True).start()
@@ -653,6 +789,7 @@ class GrokBatchTool:
                     raise XAIError(f"创建成功但没有返回 batch_id: {json.dumps(batch, ensure_ascii=False)}")
                 self.batch_id.set(bid)
                 self.log(f"Batch 已创建: {bid}")
+                self.mark_batch_verified("xAI 官方 Batch（逐条提交）", bid)
 
                 for idx, part in enumerate(chunked(rows, 100), start=1):
                     batch_requests = []
@@ -729,6 +866,8 @@ class GrokBatchTool:
                     raise XAIError(f"Batch 创建成功但没有返回 id: {json.dumps(batch, ensure_ascii=False)}")
                 self.batch_id.set(bid)
                 self.log(f"文件上传 Batch 已创建: {bid}")
+                label = "xAI 官方 Batch（JSONL 文件上传）" if mode == "xai_batch_file" else "OpenAI 官方 Batch（JSONL 文件上传）"
+                self.mark_batch_verified(label, bid)
                 self.log("稍后可点击“查询进度”；完成后点击“获取并导出结果”。")
             except Exception as exc:
                 msg = friendly_error(exc)
@@ -756,6 +895,7 @@ class GrokBatchTool:
 
                 url = f"{base}/chat/completions"
                 self.log(f"开始 OpenAI-compatible 批量处理：{len(rows)} 条，并发 {max_workers}。")
+                self.mark_non_batch()
 
                 def call_one(index, text):
                     payload = {
@@ -804,15 +944,26 @@ class GrokBatchTool:
         safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)[:80]
         json_path = out_dir / f"grok_batch_results_{safe_name}_{stamp}.json"
         csv_path = out_dir / f"grok_batch_results_{safe_name}_{stamp}.csv"
-        json_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+        meta = {
+            "execution_mode": self.last_run_mode or self.describe_current_execution_mode(),
+            "is_batch": bool(self.last_batch_verified),
+            "batch_id": self.batch_id.get().strip(),
+            "provider": self.provider.get(),
+            "model": self.model.get().strip(),
+            "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "results": results,
+        }
+        json_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["batch_request_id", "input", "text", "error", "raw_json"])
+            writer.writerow(["execution_mode", "is_batch", "batch_request_id", "input", "text", "error", "raw_json"])
             for item in results:
                 if isinstance(item, dict):
                     request_id = item.get("batch_request_id") or item.get("custom_id") or ""
                     writer.writerow(
                         [
+                            meta["execution_mode"],
+                            meta["is_batch"],
                             request_id,
                             item.get("input", ""),
                             item.get("text") or extract_text(item),
@@ -821,11 +972,48 @@ class GrokBatchTool:
                         ]
                     )
                 else:
-                    writer.writerow(["", "", extract_text(item), "", json.dumps(item, ensure_ascii=False)])
+                    writer.writerow([meta["execution_mode"], meta["is_batch"], "", "", extract_text(item), "", json.dumps(item, ensure_ascii=False)])
         self.log(f"已导出 {len(results)} 条结果:")
         self.log(str(json_path))
         self.log(str(csv_path))
         self.show_results_in_viewer(results)
+
+    def check_execution_mode(self):
+        def work():
+            try:
+                mode = self.current_mode()
+                bid = self.batch_id.get().strip()
+                if mode == "openai_chat":
+                    self.mark_non_batch()
+                    messagebox.showinfo("执行方式", "当前模式不是 Batch。\n实际会逐条调用 /chat/completions，并发处理。")
+                    return
+                if not bid:
+                    label = self.describe_current_execution_mode()
+                    self.log(f"当前选择的是 Batch 模式：{label}，但还没有 Batch ID。请先开始处理。")
+                    messagebox.showinfo("执行方式", f"当前选择的是 Batch 模式：{label}\n但还没有 Batch ID。")
+                    return
+                api_key = self.require_key()
+                base = self.base_url.get().strip().rstrip("/")
+                if mode == "xai_batch":
+                    data = request_json("GET", f"/batches/{urllib.parse.quote(bid)}", api_key)
+                else:
+                    data = request_json_url("GET", f"{base}/batches/{urllib.parse.quote(bid)}", api_key)
+                returned_id = data.get("id") or data.get("batch_id") if isinstance(data, dict) else ""
+                state = data.get("state", {}) if isinstance(data, dict) else {}
+                is_batch = bool(returned_id or state)
+                if is_batch:
+                    self.mark_batch_verified(self.describe_current_execution_mode(), returned_id or bid)
+                    self.log(f"Batch 状态：{json.dumps(state or data, ensure_ascii=False, indent=2)}")
+                    messagebox.showinfo("执行方式", f"确认已走 Batch。\nBatch ID: {returned_id or bid}")
+                else:
+                    self.log(f"没有从 /batches 查询到有效 Batch 结构：{json.dumps(data, ensure_ascii=False)[:600]}")
+                    messagebox.showwarning("执行方式", "没有确认到 Batch 结构，请检查 Batch ID 和模式。")
+            except Exception as exc:
+                msg = friendly_error(exc)
+                self.log(f"判断执行方式失败: {msg}")
+                messagebox.showerror("判断失败", msg)
+
+        self.run_async(work)
 
     def result_id(self, item, index):
         if isinstance(item, dict):
@@ -874,11 +1062,26 @@ class GrokBatchTool:
         p = Path(path)
         if p.suffix.lower() == ".csv":
             with p.open("r", encoding="utf-8-sig", newline="") as f:
-                return list(csv.DictReader(f))
+                rows = []
+                for row in csv.DictReader(f):
+                    normalized = dict(row)
+                    if not (normalized.get("text") or "").strip() and (normalized.get("raw_json") or "").strip():
+                        try:
+                            raw = json.loads(normalized["raw_json"])
+                            normalized["text"] = extract_text(raw)
+                            normalized["_parsed_raw_json"] = raw
+                        except json.JSONDecodeError:
+                            pass
+                    rows.append(normalized)
+                return rows
         data = json.loads(p.read_text(encoding="utf-8-sig"))
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
+            if isinstance(data.get("results"), list):
+                self.last_run_mode = data.get("execution_mode", self.last_run_mode)
+                self.last_batch_verified = bool(data.get("is_batch", self.last_batch_verified))
+                return data["results"]
             for key in ("results", "data", "batch_requests"):
                 if isinstance(data.get(key), list):
                     return data[key]
